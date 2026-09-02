@@ -78,12 +78,13 @@ Sends an email to a specific recipient.
 - `to` (required): recipient's email address
 - `subject` (required): email subject
 - `text` and/or `html` (at least one required): email body
-- `attachmentName` (optional): one PDF name or an array of PDF names, with or without `.pdf`
+- `attachmentName` (optional): one file name or an array of file names, with or without the extension
 
 Available attachments:
 
 - `KR 4 R600-3.pdf`
 - `KR C5 micro.pdf`
+- `Mountain and Forest Activities   Taiwan Tourism Video 30 seconds.mp4`
 
 **Success response (200):**
 

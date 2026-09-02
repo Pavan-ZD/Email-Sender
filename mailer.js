@@ -5,15 +5,35 @@ const path = require("path");
 const attachmentDirectory = __dirname;
 const attachmentFiles = fs
   .readdirSync(attachmentDirectory)
-  .filter((fileName) => path.extname(fileName).toLowerCase() === ".pdf");
+  .filter((fileName) =>
+    fs.statSync(path.join(attachmentDirectory, fileName)).isFile(),
+  );
+
+const normalizeAttachmentName = (value) => {
+  const parsed = path.parse(String(value || "").trim());
+  const baseName = parsed.name || String(value || "").trim();
+
+  return baseName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
 
 const findAttachment = (attachmentName) => {
-  const requestedName = path
-    .parse(String(attachmentName).trim())
-    .name.toLowerCase();
-  const matchingFile = attachmentFiles.find(
-    (fileName) => path.parse(fileName).name.toLowerCase() === requestedName,
-  );
+  if (typeof attachmentName !== "string" || !attachmentName.trim()) {
+    return null;
+  }
+
+  const requestedName = normalizeAttachmentName(attachmentName);
+  const matchingFile = attachmentFiles.find((fileName) => {
+    const fileNameNormalized = normalizeAttachmentName(fileName);
+    return (
+      fileNameNormalized === requestedName ||
+      fileNameNormalized.includes(requestedName) ||
+      requestedName.includes(fileNameNormalized)
+    );
+  });
 
   return matchingFile ? path.join(attachmentDirectory, matchingFile) : null;
 };
@@ -55,11 +75,10 @@ const sendEmail = async ({
     : [];
   const attachmentPaths = attachmentNames.map(findAttachment);
 
-  const missingAttachment = attachmentPaths.find(
+  const missingIndex = attachmentPaths.findIndex(
     (attachmentPath) => !attachmentPath,
   );
-  if (missingAttachment) {
-    const missingIndex = attachmentPaths.indexOf(missingAttachment);
+  if (missingIndex !== -1) {
     throw new Error(`Attachment not found: ${attachmentNames[missingIndex]}`);
   }
   if (attachmentPaths.length) {
