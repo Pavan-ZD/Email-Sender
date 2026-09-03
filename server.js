@@ -37,11 +37,12 @@ app.post("/api/send-email", async (req, res) => {
       });
     }
 
-    const attachmentNames = attachmentName
-      ? Array.isArray(attachmentName)
-        ? attachmentName
-        : [attachmentName]
-      : [];
+    const attachmentNames = Array.isArray(attachmentName)
+      ? attachmentName
+      : attachmentName
+        ? [attachmentName]
+        : [];
+
     if (
       attachmentNames.some((name) => typeof name !== "string" || !name.trim())
     ) {
@@ -51,7 +52,13 @@ app.post("/api/send-email", async (req, res) => {
       });
     }
 
-    const info = await sendEmail({ to, subject, text, html, attachmentName });
+    const info = await sendEmail({
+      to,
+      subject,
+      text,
+      html,
+      attachmentName: attachmentNames,
+    });
 
     return res.status(200).json({
       success: true,
