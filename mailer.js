@@ -1,15 +1,17 @@
 const nodemailer = require("nodemailer");
 const path = require("path");
 const sharp = require("sharp");
-const AWS = require("aws-sdk");
+const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const mysql = require("mysql2/promise");
 
-const s3 = new AWS.S3({
+const s3 = new S3Client({
   endpoint: process.env.DO_SPACES_ENDPOINT,
-  accessKeyId: process.env.DO_SPACES_KEY,
-  secretAccessKey: process.env.DO_SPACES_SECRET,
   region: process.env.DO_SPACES_REGION,
-  signatureVersion: "v4",
+  credentials: {
+    accessKeyId: process.env.DO_SPACES_KEY,
+    secretAccessKey: process.env.DO_SPACES_SECRET,
+  },
 });
 
 const normalizeAttachmentName = (value) => {
@@ -147,6 +149,14 @@ const normalizeUrlList = (value) => {
   return [];
 };
 
+const escapeHtml = (value) =>
+  String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
 const buildLinkMessage = ({ text, html, links }) => {
   const normalizedLinks = links.filter((item) => item && item.url);
 
@@ -158,32 +168,60 @@ const buildLinkMessage = ({ text, html, links }) => {
     .map((item) => `${item.name || "File"}: ${item.url}`)
     .join("\n");
 
-  const defaultThumbnail =
-    "https://placehold.co/240x140/0f172a/ffffff?text=Download";
+  const countLabel =
+    normalizedLinks.length === 1 ? "1 file" : `${normalizedLinks.length} files`;
 
   const listHtml = normalizedLinks
     .map((item) => {
-      const thumbnailUrl = item.thumbnailUrl || defaultThumbnail;
+      const safeName = escapeHtml(item.name || "Download file");
+      const safeUrl = escapeHtml(item.url);
+      const thumbnailUrl = escapeHtml(item.thumbnailUrl || item.url);
       return `
-        <div style="margin-bottom: 18px;">
-          <a href="${item.url}" target="_blank" rel="noopener noreferrer">
-            <img
-              src="${thumbnailUrl}"
-              alt="${item.name || "Download file"}"
-              style="width: 220px; height: auto; border-radius: 8px; display: block; margin-bottom: 8px; border: 1px solid #e2e8f0;"
-            />
-          </a>
-          <a href="${item.url}" target="_blank" rel="noopener noreferrer" style="color: #0f172a; text-decoration: none; font-weight: 600;">
-            ${item.name || "Download file"}
-          </a>
-        </div>
+        <tr>
+          <td style="padding: 0 0 14px 0;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border: 1px solid #dbe3ee; border-radius: 12px; background: #ffffff;">
+              <tr>
+                <td style="padding: 12px; width: 150px; vertical-align: middle;">
+                  <a href="${safeUrl}" target="_blank" style="text-decoration: none;">
+                    <img src="${thumbnailUrl}" width="150" alt="${safeName}" style="display: block; width: 150px; height: 88px; object-fit: cover; border-radius: 8px; border: 0;" />
+                  </a>
+                </td>
+                <td style="padding: 12px 14px 12px 4px; vertical-align: middle;">
+                  <div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 20px; font-weight: 700; color: #172033; word-break: break-word;">${safeName}</div>
+                  <div style="font-family: Arial, sans-serif; font-size: 12px; line-height: 18px; color: #718096; padding-top: 3px;">Shared file</div>
+                  <a href="${safeUrl}" target="_blank" style="display: inline-block; margin-top: 9px; padding: 8px 14px; border-radius: 6px; background: #2563eb; color: #ffffff; font-family: Arial, sans-serif; font-size: 12px; line-height: 16px; font-weight: 700; text-decoration: none;">Open file</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
       `;
     })
     .join("");
 
+  const listHtmlSection = `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 620px; margin: 24px auto; background: #f4f7fb;">
+      <tr>
+        <td style="padding: 26px 22px 12px 22px;">
+          <div style="font-family: Arial, sans-serif; font-size: 12px; line-height: 18px; letter-spacing: 1px; text-transform: uppercase; color: #2563eb; font-weight: 700;">Files shared with you</div>
+          <div style="font-family: Arial, sans-serif; font-size: 24px; line-height: 30px; color: #172033; font-weight: 700; padding-top: 4px;">Your ${countLabel} are ready</div>
+          <div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 21px; color: #64748b; padding-top: 5px;">Select a file below to view or download it securely.</div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding: 8px 22px 12px 22px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${listHtml}</table>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding: 4px 22px 24px 22px; font-family: Arial, sans-serif; font-size: 11px; line-height: 17px; color: #94a3b8;">Links may expire for security. Please contact the sender if a link is no longer available.</td>
+      </tr>
+    </table>
+  `;
+
   return {
     text: [text, "\n\nDownload links:\n", listText].filter(Boolean).join(""),
-    html: [html, listHtml].filter(Boolean).join(""),
+    html: [html, listHtmlSection].filter(Boolean).join(""),
   };
 };
 
@@ -192,21 +230,15 @@ const getPresignedUrl = (key) => {
     return null;
   }
 
-  return s3.getSignedUrl("getObject", {
-    Bucket: process.env.DO_SPACES_BUCKET,
-    Key: key,
-    Expires: Number(process.env.DO_SPACES_URL_EXPIRES || 3600),
-  });
+  return getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: process.env.DO_SPACES_BUCKET,
+      Key: key,
+    }),
+    { expiresIn: Number(process.env.DO_SPACES_URL_EXPIRES || 3600) },
+  );
 };
-
-console.log("DigitalOcean Spaces configuration:", {
-  bucket: process.env.DO_SPACES_BUCKET,
-  endpoint: process.env.DO_SPACES_ENDPOINT,
-  key: process.env.DO_SPACES_KEY ? "configured" : "not configured",
-  secret: process.env.DO_SPACES_SECRET ? "configured" : "not configured",
-  region: process.env.DO_SPACES_REGION,
-  urlExpires: process.env.DO_SPACES_URL_EXPIRES || "3600",
-});
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
@@ -247,7 +279,8 @@ const findFilesByNames = async (names) => {
             .join(", ")})`,
       [...normalizedNames, ...extensionlessNames],
     );
-    console.log("DB lookup results:", rows);
+
+    console.log(rows, " DB query executed successfully.");
 
     (rows || []).forEach((row) => {
       const rowName = String(row.name || "");
@@ -312,7 +345,7 @@ const sendEmail = async ({
       }
 
       dbMatchFound = true;
-      const signedUrl = getPresignedUrl(fileRecord.key);
+      const signedUrl = await getPresignedUrl(fileRecord.key);
       if (!signedUrl) {
         throw new Error(
           `DigitalOcean Spaces is not configured for attachment "${normalizedName}". Add DO_SPACES_BUCKET, DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_ENDPOINT, and DO_SPACES_REGION.`,
@@ -320,6 +353,9 @@ const sendEmail = async ({
       }
 
       let thumbnailUrl = fileRecord.thumbnailUrl || null;
+      if (thumbnailUrl) {
+        thumbnailUrl = (await getPresignedUrl(thumbnailUrl)) || thumbnailUrl;
+      }
       if (!thumbnailUrl) {
         thumbnailUrl = await generateThumbnailForName(
           fileRecord.name || normalizedName,

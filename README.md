@@ -57,6 +57,57 @@ This project can be deployed as a Node web service on Render:
 The hosted endpoint will look like:
 `https://your-service-name.onrender.com/api/send-email`
 
+## Upload files from the frontend
+
+### POST /api/files
+
+Uploads any file to DigitalOcean Spaces, creates a thumbnail, and stores the
+original file key and thumbnail key in MySQL. Use `multipart/form-data` with
+the field name `file`.
+
+Example frontend request:
+
+```js
+const formData = new FormData();
+formData.append("file", selectedFile);
+
+const response = await fetch("http://localhost:3000/api/files", {
+  method: "POST",
+  body: formData,
+});
+
+const result = await response.json();
+console.log(result.file.name);
+```
+
+The upload response contains the file name and the stored object keys. Send
+`result.file.name` as `attachmentName` to `/api/send-email`. The email API then
+generates signed URLs and does not attach the remote file to the email.
+
+The `files` table must contain these columns:
+
+```sql
+CREATE TABLE files (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  key_path VARCHAR(1024) NOT NULL,
+  thumbnail_url VARCHAR(1024) NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+If the table already exists, run this migration before uploading again:
+
+```sql
+ALTER TABLE files
+  MODIFY name VARCHAR(255) NOT NULL,
+  MODIFY key_path VARCHAR(1024) NOT NULL,
+  MODIFY thumbnail_url VARCHAR(1024) NULL;
+```
+
+Images receive a resized thumbnail, videos receive a frame captured by
+FFmpeg, and other file types receive a generated file preview image.
+
 ## Endpoint
 
 ### POST /api/send-email

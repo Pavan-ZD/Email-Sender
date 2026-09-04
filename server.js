@@ -1,11 +1,20 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
 const { sendEmail } = require("./mailer");
+const { saveFile } = require("./file-storage");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: Number(process.env.UPLOAD_MAX_SIZE_MB || 500) * 1024 * 1024,
+  },
+});
 
 // Simple email format check (not exhaustive, just a sanity check)
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -13,6 +22,42 @@ const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Email API is running" });
 });
+
+app.post(
+  "/api/files",
+  (req, res, next) => {
+    upload.single("file")(req, res, (error) => {
+      if (error) {
+        return next(error);
+      }
+      return next();
+    });
+  },
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          error: 'Send one file using the multipart field name "file".',
+        });
+      }
+
+      const savedFile = await saveFile(req.file);
+      return res.status(201).json({
+        success: true,
+        message: "File uploaded successfully",
+        file: savedFile,
+      });
+    } catch (error) {
+      console.error("Error uploading file:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to upload file",
+        details: error.message,
+      });
+    }
+  },
+);
 
 /**
  * POST /api/send-email
@@ -73,6 +118,23 @@ app.post("/api/send-email", async (req, res) => {
       details: err.message,
     });
   }
+});
+
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    const message =
+      error.code === "LIMIT_FILE_SIZE"
+        ? `File is too large. Maximum size is ${process.env.UPLOAD_MAX_SIZE_MB || 500} MB.`
+        : error.message;
+    return res.status(400).json({ success: false, error: message });
+  }
+
+  console.error("Unhandled API error:", error);
+  return res.status(500).json({
+    success: false,
+    error: "Internal server error",
+    details: error.message,
+  });
 });
 
 const PORT = process.env.PORT || 3000;
