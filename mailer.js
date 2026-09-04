@@ -1,16 +1,8 @@
 const nodemailer = require("nodemailer");
-const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
 const AWS = require("aws-sdk");
 const mysql = require("mysql2/promise");
-
-const attachmentDirectory = __dirname;
-const attachmentFiles = fs
-  .readdirSync(attachmentDirectory)
-  .filter((fileName) =>
-    fs.statSync(path.join(attachmentDirectory, fileName)).isFile(),
-  );
 
 const s3 = new AWS.S3({
   endpoint: process.env.DO_SPACES_ENDPOINT,
@@ -29,24 +21,6 @@ const normalizeAttachmentName = (value) => {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-};
-
-const findAttachment = (attachmentName) => {
-  if (typeof attachmentName !== "string" || !attachmentName.trim()) {
-    return null;
-  }
-
-  const requestedName = normalizeAttachmentName(attachmentName);
-  const matchingFile = attachmentFiles.find((fileName) => {
-    const fileNameNormalized = normalizeAttachmentName(fileName);
-    return (
-      fileNameNormalized === requestedName ||
-      fileNameNormalized.includes(requestedName) ||
-      requestedName.includes(fileNameNormalized)
-    );
-  });
-
-  return matchingFile ? path.join(attachmentDirectory, matchingFile) : null;
 };
 
 const config = {
@@ -81,26 +55,43 @@ const videoExtensions = new Set([
   ".flv",
 ]);
 
-const generatePlaceholderThumbnail = async (label = "FILE") => {
+const generatePlaceholderThumbnail = async (
+  label = "FILE",
+  type = "document",
+) => {
   const safeLabel = String(label || "FILE")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .slice(0, 12)
     .toUpperCase();
+  const palettes = [
+    ["#0f172a", "#2563eb"],
+    ["#3f1d38", "#be185d"],
+    ["#12372a", "#16a34a"],
+    ["#431407", "#ea580c"],
+    ["#312e81", "#7c3aed"],
+  ];
+  const [startColor, endColor] =
+    palettes[Math.floor(Math.random() * palettes.length)];
+  const icon =
+    type === "video"
+      ? '<circle cx="70" cy="70" r="25" fill="rgba(255,255,255,0.2)"/><path d="M62 56 L88 70 L62 84 Z" fill="#fff"/>'
+      : type === "image"
+        ? '<rect x="43" y="45" width="54" height="48" rx="4" fill="rgba(255,255,255,0.15)" stroke="#fff" stroke-opacity="0.8" stroke-width="2"/><circle cx="59" cy="59" r="6" fill="#fff" fill-opacity="0.8"/><path d="M47 85l14-15 10 9 8-8 14 14" fill="none" stroke="#fff" stroke-opacity="0.8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+        : '<path d="M42 38h34l12 12v52H42z" fill="rgba(255,255,255,0.2)" stroke="#fff" stroke-opacity="0.8" stroke-width="2"/><path d="M76 38v14h12" fill="none" stroke="#fff" stroke-opacity="0.8" stroke-width="2"/><path d="M52 72h26M52 84h20" stroke="#fff" stroke-opacity="0.8" stroke-width="3" stroke-linecap="round"/>';
 
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="240" height="140" viewBox="0 0 240 140">
       <defs>
         <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#0f172a"/>
-          <stop offset="100%" stop-color="#1d4ed8"/>
+          <stop offset="0%" stop-color="${startColor}"/>
+          <stop offset="100%" stop-color="${endColor}"/>
         </linearGradient>
       </defs>
       <rect width="240" height="140" fill="url(#g)" rx="12"/>
-      <circle cx="84" cy="70" r="24" fill="rgba(255,255,255,0.18)"/>
-      <path d="M76 56 L106 70 L76 84 Z" fill="#fff"/>
-      <text x="120" y="95" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#ffffff">${safeLabel}</text>
+      ${icon}
+      <text x="138" y="80" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#ffffff">${safeLabel}</text>
     </svg>
   `;
 
@@ -112,58 +103,22 @@ const generatePlaceholderThumbnail = async (label = "FILE") => {
   return `data:image/png;base64,${imageBuffer.toString("base64")}`;
 };
 
-const generateThumbnailFromSource = async (
-  sourcePath,
-  fallbackName = "FILE",
-) => {
-  if (!sourcePath || !fs.existsSync(sourcePath)) {
-    return null;
-  }
-
-  const ext = path.extname(sourcePath).toLowerCase();
-
-  if (imageExtensions.has(ext)) {
-    const buffer = await sharp(sourcePath)
-      .resize({
-        width: 240,
-        height: 240,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .jpeg({ quality: 72, progressive: true })
-      .toBuffer();
-
-    return `data:image/jpeg;base64,${buffer.toString("base64")}`;
-  }
-
-  if (videoExtensions.has(ext)) {
-    const label = path.basename(sourcePath, ext) || fallbackName;
-    return generatePlaceholderThumbnail(label);
-  }
-
-  return null;
-};
-
 const generateThumbnailForName = async (name, key) => {
-  const localPath = findAttachment(name);
-  if (localPath) {
-    return generateThumbnailFromSource(localPath, name);
-  }
-
   const sourceKey = key || name;
-  const ext = path.extname(String(sourceKey)).toLowerCase();
-
-  if (imageExtensions.has(ext)) {
-    const label = path.basename(sourceKey, ext) || name || "IMAGE";
-    return generateThumbnailFromSource(
-      path.join(attachmentDirectory, `${path.basename(sourceKey)}`),
-      label,
-    );
-  }
+  const ext = (
+    path.extname(String(sourceKey)) || path.extname(String(name))
+  ).toLowerCase();
 
   if (videoExtensions.has(ext)) {
     const label = path.basename(sourceKey, ext) || name || "VIDEO";
-    return generatePlaceholderThumbnail(label);
+    return generatePlaceholderThumbnail(label, "video");
+  }
+
+  if (imageExtensions.has(ext)) {
+    return generatePlaceholderThumbnail(
+      path.basename(sourceKey, ext) || name,
+      "image",
+    );
   }
 
   return generatePlaceholderThumbnail(name || "FILE");
@@ -280,20 +235,37 @@ const findFilesByNames = async (names) => {
 
   try {
     const placeholders = normalizedNames.map(() => "?").join(", ");
+    const extensionlessNames = normalizedNames.map((name) =>
+      path.extname(name) ? path.basename(name, path.extname(name)) : name,
+    );
     const [rows] = await db.query(
-      `SELECT name, key_path AS file_key, thumbnail_url AS thumbnailUrl FROM files WHERE LOWER(name) IN (${placeholders})`,
-      normalizedNames,
+      `SELECT name, key_path AS file_key, thumbnail_url AS thumbnailUrl
+       FROM files
+       WHERE LOWER(name) IN (${placeholders})
+          OR LOWER(SUBSTRING_INDEX(name, '.', 1)) IN (${extensionlessNames
+            .map(() => "?")
+            .join(", ")})`,
+      [...normalizedNames, ...extensionlessNames],
     );
     console.log("DB lookup results:", rows);
 
     (rows || []).forEach((row) => {
-      fileLookup.set(String(row.name).toLowerCase(), {
+      const rowName = String(row.name || "");
+      const record = {
+        name: rowName,
         key: row.file_key,
         thumbnailUrl: row.thumbnailUrl || row.imageUrl || null,
-      });
+      };
+      fileLookup.set(rowName.toLowerCase(), record);
+      const normalizedRowName = normalizeAttachmentName(rowName);
+      fileLookup.set(normalizedRowName, record);
+      fileLookup.set(
+        normalizeAttachmentName(path.basename(rowName, path.extname(rowName))),
+        record,
+      );
     });
   } catch (error) {
-    console.error("DB lookup failed:", error);
+    throw new Error(`Database attachment lookup failed: ${error.message}`);
   }
 
   return fileLookup;
@@ -331,7 +303,9 @@ const sendEmail = async ({
     for (const name of attachmentNames) {
       const normalizedName = String(name).trim();
       const lookupKey = normalizedName.toLowerCase();
-      const fileRecord = foundFiles.get(lookupKey);
+      const fileRecord =
+        foundFiles.get(lookupKey) ||
+        foundFiles.get(normalizeAttachmentName(normalizedName));
 
       if (!fileRecord) {
         continue;
@@ -348,19 +322,19 @@ const sendEmail = async ({
       let thumbnailUrl = fileRecord.thumbnailUrl || null;
       if (!thumbnailUrl) {
         thumbnailUrl = await generateThumbnailForName(
-          normalizedName,
+          fileRecord.name || normalizedName,
           fileRecord.key,
         );
       }
 
       dbLinks.push({
-        name: normalizedName,
+        name: fileRecord.name || normalizedName,
         url: signedUrl,
         thumbnailUrl,
       });
     }
 
-    if (dbLinks.length) {
+    if (dbLinks.length === attachmentNames.length) {
       const linkMessage = buildLinkMessage({
         text: message.text,
         html: message.html,
@@ -371,20 +345,14 @@ const sendEmail = async ({
       return transport.sendMail(message);
     }
 
-    if (dbMatchFound) {
+    if (dbMatchFound || attachmentNames.length) {
+      const missingNames = attachmentNames.filter(
+        (name) => !foundFiles.has(String(name).trim().toLowerCase()),
+      );
       throw new Error(
-        "Database file matched, but no signed URL could be generated. Check your DigitalOcean Spaces configuration.",
+        `Attachment not found in database: ${missingNames.join(", ") || attachmentNames.join(", ")}`,
       );
     }
-  }
-
-  const attachmentPaths = attachmentNames.map(findAttachment);
-
-  const missingIndex = attachmentPaths.findIndex(
-    (attachmentPath) => !attachmentPath,
-  );
-  if (missingIndex !== -1) {
-    throw new Error(`Attachment not found: ${attachmentNames[missingIndex]}`);
   }
 
   return transport.sendMail(message);

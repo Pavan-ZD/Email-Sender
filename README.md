@@ -36,7 +36,7 @@ The API will run on `http://localhost:3000` by default.
 
 This project can be deployed as a Node web service on Render:
 
-1. Push the project to a GitHub repository. Include `KR 4 R600-3.pdf` and `KR C5 micro.pdf` in the repository because the API reads attachments from the project folder.
+1. Push the project to a GitHub repository. Attachments are read from the database and DigitalOcean Spaces, so attachment files do not need to be included in the repository.
 2. In Render, create a **Web Service** and select the repository.
 3. Use these settings:
 
@@ -80,11 +80,7 @@ Sends an email to a specific recipient.
 - `text` and/or `html` (at least one required): email body
 - `attachmentName` (optional): one file name or an array of file names, with or without the extension
 
-Available attachments:
-
-- `KR 4 R600-3.pdf`
-- `KR C5 micro.pdf`
-- `Mountain and Forest Activities   Taiwan Tourism Video 30 seconds.mp4`
+`attachmentName` must match a file name stored in the `files` database table. The stored `key_path` must point to the corresponding object in DigitalOcean Spaces. The name may be sent with or without its extension.
 
 **Success response (200):**
 
