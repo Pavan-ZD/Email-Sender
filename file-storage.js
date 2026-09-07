@@ -8,6 +8,14 @@ const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const mysql = require("mysql2/promise");
 const ffmpegPath = require("ffmpeg-static");
 
+const databaseSsl =
+  process.env.DB_SSL === "true"
+    ? {
+        ca: fs.readFileSync(path.join(__dirname, "ca-certificate.crt")),
+        rejectUnauthorized: true,
+      }
+    : undefined;
+
 const s3 = new S3Client({
   endpoint: process.env.DO_SPACES_ENDPOINT,
   region: process.env.DO_SPACES_REGION,
@@ -19,9 +27,11 @@ const s3 = new S3Client({
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  ...(databaseSsl ? { ssl: databaseSsl } : {}),
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,

@@ -4,8 +4,22 @@ const cors = require("cors");
 const multer = require("multer");
 const { sendEmail } = require("./mailer");
 const { saveFile } = require("./file-storage");
+const { readFileSync } = require("fs");
 
-const app = express();
+const privateKey = readFileSync("/etc/pki/tls/private/zerodistance_io.key");
+const certificate = readFileSync(
+  "/etc/pki/tls/certs/STAR_zerodistance_io_2026.crt",
+);
+const intCertificate = readFileSync(
+  "/etc/pki/tls/certs/STAR_zerodistance_io_2026.ca-bundle",
+);
+const credentials = {
+  key: privateKey,
+  cert: certificate,
+  ca: intCertificate,
+};
+const app = express({ https: credentials });
+
 app.use(cors());
 app.use(express.json());
 

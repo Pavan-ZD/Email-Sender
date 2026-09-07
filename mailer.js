@@ -1,9 +1,18 @@
 const nodemailer = require("nodemailer");
+const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
 const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const mysql = require("mysql2/promise");
+
+const databaseSsl =
+  process.env.DB_SSL === "true"
+    ? {
+        ca: fs.readFileSync(path.join(__dirname, "ca-certificate.crt")),
+        rejectUnauthorized: true,
+      }
+    : undefined;
 
 const s3 = new S3Client({
   endpoint: process.env.DO_SPACES_ENDPOINT,
@@ -242,9 +251,11 @@ const getPresignedUrl = (key) => {
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  ...(databaseSsl ? { ssl: databaseSsl } : {}),
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -279,8 +290,6 @@ const findFilesByNames = async (names) => {
             .join(", ")})`,
       [...normalizedNames, ...extensionlessNames],
     );
-
-    console.log(rows, " DB query executed successfully.");
 
     (rows || []).forEach((row) => {
       const rowName = String(row.name || "");
