@@ -77,12 +77,13 @@ const response = await fetch("http://localhost:3000/api/files", {
 });
 
 const result = await response.json();
-console.log(result.file.name);
+console.log(result.file.hash);
 ```
 
-The upload response contains the file name and the stored object keys. Send
-`result.file.name` as `attachmentName` to `/api/send-email`. The email API then
-generates signed URLs and does not attach the remote file to the email.
+The upload response contains the file name, its SHA-256 hash, and the stored
+object keys. Send `result.file.hash` as `attachmentHash` to `/api/send-email`.
+The email API then generates signed URLs and does not attach the remote file to
+the email.
 
 The `files` table must contain these columns:
 
@@ -90,9 +91,11 @@ The `files` table must contain these columns:
 CREATE TABLE files (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
+  file_hash CHAR(64) NOT NULL,
   key_path VARCHAR(1024) NOT NULL,
   thumbnail_url VARCHAR(1024) NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_files_file_hash (file_hash)
 );
 ```
 
@@ -101,12 +104,55 @@ If the table already exists, run this migration before uploading again:
 ```sql
 ALTER TABLE files
   MODIFY name VARCHAR(255) NOT NULL,
+  ADD COLUMN file_hash CHAR(64) NULL AFTER name,
   MODIFY key_path VARCHAR(1024) NOT NULL,
-  MODIFY thumbnail_url VARCHAR(1024) NULL;
+  MODIFY thumbnail_url VARCHAR(1024) NULL,
+  ADD INDEX idx_files_file_hash (file_hash);
 ```
+
+Rows uploaded before this migration have no hash, so re-upload them (or
+backfill `file_hash`) before sending them by hash.
 
 Images receive a resized thumbnail, videos receive a frame captured by
 FFmpeg, and other file types receive a generated file preview image.
+
+### POST /api/files/exists
+
+Checks whether files with the given hashes have already been uploaded. Send
+`hash` as JSON in the request body, either as one string or as an array.
+
+With an array, the response has one entry per hash, in the same order:
+
+```json
+// Request
+{ "hash": ["<hash1>", "<hash2>"] }
+
+// Response
+{
+  "success": true,
+  "results": [
+    { "hash": "<hash1>", "exists": true },
+    { "hash": "<hash2>", "exists": false }
+  ]
+}
+```
+
+With a single string:
+
+```js
+const response = await fetch("http://localhost:3000/api/files/exists", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ hash }),
+});
+const { exists } = await response.json(); // true or false
+```
+
+**Response (200):**
+
+```json
+{ "success": true, "exists": true }
+```
 
 ## Endpoint
 
@@ -122,16 +168,16 @@ Sends an email to a specific recipient.
   "subject": "Hello!",
   "text": "This is a plain text email.",
   "html": "<p>This is an <b>HTML</b> email.</p>",
-  "attachmentName": ["KR 4 R600-3", "KR C5 micro"]
+  "attachmentHash": ["<hash returned by /api/files>"]
 }
 ```
 
 - `to` (required): recipient's email address
 - `subject` (required): email subject
 - `text` and/or `html` (at least one required): email body
-- `attachmentName` (optional): one file name or an array of file names, with or without the extension
+- `attachmentHash` (optional): one file hash or an array of file hashes
 
-`attachmentName` must match a file name stored in the `files` database table. The stored `key_path` must point to the corresponding object in DigitalOcean Spaces. The name may be sent with or without its extension.
+Each `attachmentHash` must match a `file_hash` stored in the `files` database table. The stored `key_path` must point to the corresponding object in DigitalOcean Spaces.
 
 **Success response (200):**
 
@@ -161,7 +207,7 @@ curl -X POST http://localhost:3000/api/send-email \
     "to": "someone@example.com",
     "subject": "Test Email",
     "text": "Hello from the Email API!",
-    "attachmentName": "KR 4 R600-3"
+    "attachmentHash": "<hash returned by /api/files>"
   }'
 ```
 

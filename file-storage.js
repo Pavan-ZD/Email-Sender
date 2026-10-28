@@ -182,6 +182,10 @@ const saveFile = async (file) => {
 
   const originalName = safeFileName(file.originalname);
   const databaseName = path.parse(file.originalname).name;
+  const fileHash = crypto
+    .createHash("sha256")
+    .update(file.buffer)
+    .digest("hex");
   const token = crypto.randomBytes(8).toString("hex");
   const folder = (process.env.DO_SPACES_FOLDER || "email-files").replace(
     /^\/+|\/+$/g,
@@ -203,16 +207,34 @@ const saveFile = async (file) => {
   });
 
   const [result] = await db.execute(
-    "INSERT INTO files (name, key_path, thumbnail_url) VALUES (?, ?, ?)",
-    [databaseName, fileKey, thumbnailKey],
+    "INSERT INTO files (name, file_hash, key_path, thumbnail_url) VALUES (?, ?, ?, ?)",
+    [databaseName, fileHash, fileKey, thumbnailKey],
   );
 
   return {
     id: result.insertId,
     name: databaseName,
+    hash: fileHash,
     key: fileKey,
     thumbnailKey,
   };
 };
 
-module.exports = { saveFile };
+const normalizeHash = (hash) => String(hash).trim().toLowerCase();
+
+// Returns a Set of the normalized hashes that exist in the files table
+const findExistingHashes = async (hashes) => {
+  const uniqueHashes = [...new Set(hashes.map(normalizeHash))];
+  if (!uniqueHashes.length) {
+    return new Set();
+  }
+
+  const placeholders = uniqueHashes.map(() => "?").join(", ");
+  const [rows] = await db.query(
+    `SELECT DISTINCT file_hash FROM files WHERE file_hash IN (${placeholders})`,
+    uniqueHashes,
+  );
+  return new Set(rows.map((row) => normalizeHash(row.file_hash)));
+};
+
+module.exports = { saveFile, findExistingHashes, normalizeHash };

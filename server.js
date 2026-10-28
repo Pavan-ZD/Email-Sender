@@ -3,7 +3,11 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const { sendEmail } = require("./mailer");
-const { saveFile } = require("./file-storage");
+const {
+  saveFile,
+  findExistingHashes,
+  normalizeHash,
+} = require("./file-storage");
 const { readFileSync } = require("fs");
 
 const privateKey = readFileSync("/etc/pki/tls/private/zerodistance_io.key");
@@ -74,12 +78,59 @@ app.post(
 );
 
 /**
+ * POST /api/files/exists
+ * Body: { "hash": "<file hash>" }          -> { "success": true, "exists": true | false }
+ * Body: { "hash": ["<hash1>", "<hash2>"] } -> { "success": true, "results": [{ "hash": "<hash1>", "exists": true }, ...] }
+ */
+app.post("/api/files/exists", async (req, res) => {
+  try {
+    const { hash } = req.body || {};
+    const isList = Array.isArray(hash);
+    const hashes = isList ? hash : [hash];
+
+    if (
+      !hashes.length ||
+      hashes.some((item) => typeof item !== "string" || !item.trim())
+    ) {
+      return res.status(400).json({
+        success: false,
+        error:
+          '"hash" must be a non-empty string or an array of non-empty strings.',
+      });
+    }
+
+    const existing = await findExistingHashes(hashes);
+
+    if (!isList) {
+      return res
+        .status(200)
+        .json({ success: true, exists: existing.has(normalizeHash(hash)) });
+    }
+
+    return res.status(200).json({
+      success: true,
+      results: hashes.map((item) => ({
+        hash: item,
+        exists: existing.has(normalizeHash(item)),
+      })),
+    });
+  } catch (error) {
+    console.error("Error checking file hash:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to check file",
+      details: error.message,
+    });
+  }
+});
+
+/**
  * POST /api/send-email
- * Body: { "to": "person@example.com", "subject": "Hi", "text": "Hello!", "attachmentName": ["KR 4 R600-3", "KR C5 micro"] }
+ * Body: { "to": "person@example.com", "subject": "Hi", "text": "Hello!", "attachmentHash": ["<hash from /api/files>", "..."] }
  */
 app.post("/api/send-email", async (req, res) => {
   try {
-    const { to, subject, text, html, attachmentName } = req.body;
+    const { to, subject, text, html, attachmentHash } = req.body;
 
     if (!to || !subject || (!text && !html)) {
       return res.status(400).json({
@@ -96,18 +147,19 @@ app.post("/api/send-email", async (req, res) => {
       });
     }
 
-    const attachmentNames = Array.isArray(attachmentName)
-      ? attachmentName
-      : attachmentName
-        ? [attachmentName]
+    const attachmentHashes = Array.isArray(attachmentHash)
+      ? attachmentHash
+      : attachmentHash
+        ? [attachmentHash]
         : [];
 
     if (
-      attachmentNames.some((name) => typeof name !== "string" || !name.trim())
+      attachmentHashes.some((hash) => typeof hash !== "string" || !hash.trim())
     ) {
       return res.status(400).json({
         success: false,
-        error: '"attachmentName" must be a filename or an array of filenames.',
+        error:
+          '"attachmentHash" must be a file hash or an array of file hashes.',
       });
     }
 
@@ -116,7 +168,7 @@ app.post("/api/send-email", async (req, res) => {
       subject,
       text,
       html,
-      attachmentName: attachmentNames,
+      attachmentHash: attachmentHashes,
     });
 
     return res.status(200).json({
