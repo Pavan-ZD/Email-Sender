@@ -14,6 +14,11 @@ const databaseSsl =
       }
     : undefined;
 
+console.log(
+  "Database SSL configuration:",
+  databaseSsl ? "Enabled" : "Disabled",
+);
+
 const s3 = new S3Client({
   endpoint: process.env.DO_SPACES_ENDPOINT,
   region: process.env.DO_SPACES_REGION,
@@ -22,17 +27,6 @@ const s3 = new S3Client({
     secretAccessKey: process.env.DO_SPACES_SECRET,
   },
 });
-
-const normalizeAttachmentName = (value) => {
-  const parsed = path.parse(String(value || "").trim());
-  const baseName = parsed.name || String(value || "").trim();
-
-  return baseName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-};
 
 const config = {
   ...(process.env.SMTP_SERVICE
@@ -261,50 +255,38 @@ const db = mysql.createPool({
   queueLimit: 0,
 });
 
-const findFilesByNames = async (names) => {
+const normalizeHash = (value) => String(value || "").trim().toLowerCase();
+
+const findFilesByHashes = async (hashes) => {
   const fileLookup = new Map();
 
-  if (!Array.isArray(names) || !names.length) {
-    return fileLookup;
-  }
+  const normalizedHashes = [
+    ...new Set((hashes || []).map(normalizeHash).filter(Boolean)),
+  ];
 
-  const normalizedNames = names
-    .filter((name) => typeof name === "string" && name.trim())
-    .map((name) => name.trim().toLowerCase());
-
-  if (!normalizedNames.length) {
+  if (!normalizedHashes.length) {
     return fileLookup;
   }
 
   try {
-    const placeholders = normalizedNames.map(() => "?").join(", ");
-    const extensionlessNames = normalizedNames.map((name) =>
-      path.extname(name) ? path.basename(name, path.extname(name)) : name,
-    );
+    const placeholders = normalizedHashes.map(() => "?").join(", ");
+    // Newest first, so if the same file was uploaded twice the latest row wins
     const [rows] = await db.query(
-      `SELECT name, key_path AS file_key, thumbnail_url AS thumbnailUrl
+      `SELECT name, file_hash, key_path AS file_key, thumbnail_url AS thumbnailUrl
        FROM files
-       WHERE LOWER(name) IN (${placeholders})
-          OR LOWER(SUBSTRING_INDEX(name, '.', 1)) IN (${extensionlessNames
-            .map(() => "?")
-            .join(", ")})`,
-      [...normalizedNames, ...extensionlessNames],
+       WHERE LOWER(file_hash) IN (${placeholders})
+       ORDER BY id DESC`,
+      normalizedHashes,
     );
 
     (rows || []).forEach((row) => {
-      const rowName = String(row.name || "");
-      const record = {
-        name: rowName,
+      const hash = normalizeHash(row.file_hash);
+      if (fileLookup.has(hash)) return;
+      fileLookup.set(hash, {
+        name: String(row.name || ""),
         key: row.file_key,
-        thumbnailUrl: row.thumbnailUrl || row.imageUrl || null,
-      };
-      fileLookup.set(rowName.toLowerCase(), record);
-      const normalizedRowName = normalizeAttachmentName(rowName);
-      fileLookup.set(normalizedRowName, record);
-      fileLookup.set(
-        normalizeAttachmentName(path.basename(rowName, path.extname(rowName))),
-        record,
-      );
+        thumbnailUrl: row.thumbnailUrl || null,
+      });
     });
   } catch (error) {
     throw new Error(`Database attachment lookup failed: ${error.message}`);
@@ -319,7 +301,7 @@ const sendEmail = async ({
   text,
   html,
   replyTo,
-  attachmentName,
+  attachmentHash,
 }) => {
   const transport = nodemailer.createTransport(config);
   const message = {
@@ -331,33 +313,33 @@ const sendEmail = async ({
     replyTo,
   };
 
-  const attachmentNames = Array.isArray(attachmentName)
-    ? attachmentName
-    : attachmentName
-      ? [attachmentName]
+  const attachmentHashes = Array.isArray(attachmentHash)
+    ? attachmentHash
+    : attachmentHash
+      ? [attachmentHash]
       : [];
 
-  if (attachmentNames.length) {
-    const foundFiles = await findFilesByNames(attachmentNames);
+  if (attachmentHashes.length) {
+    const foundFiles = await findFilesByHashes(attachmentHashes);
+
+    const missingHashes = attachmentHashes.filter(
+      (hash) => !foundFiles.has(normalizeHash(hash)),
+    );
+    if (missingHashes.length) {
+      throw new Error(
+        `Attachment not found in database: ${missingHashes.join(", ")}`,
+      );
+    }
+
     const dbLinks = [];
-    let dbMatchFound = false;
 
-    for (const name of attachmentNames) {
-      const normalizedName = String(name).trim();
-      const lookupKey = normalizedName.toLowerCase();
-      const fileRecord =
-        foundFiles.get(lookupKey) ||
-        foundFiles.get(normalizeAttachmentName(normalizedName));
+    for (const hash of attachmentHashes) {
+      const fileRecord = foundFiles.get(normalizeHash(hash));
 
-      if (!fileRecord) {
-        continue;
-      }
-
-      dbMatchFound = true;
       const signedUrl = await getPresignedUrl(fileRecord.key);
       if (!signedUrl) {
         throw new Error(
-          `DigitalOcean Spaces is not configured for attachment "${normalizedName}". Add DO_SPACES_BUCKET, DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_ENDPOINT, and DO_SPACES_REGION.`,
+          `DigitalOcean Spaces is not configured for attachment "${fileRecord.name}". Add DO_SPACES_BUCKET, DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_ENDPOINT, and DO_SPACES_REGION.`,
         );
       }
 
@@ -367,37 +349,25 @@ const sendEmail = async ({
       }
       if (!thumbnailUrl) {
         thumbnailUrl = await generateThumbnailForName(
-          fileRecord.name || normalizedName,
+          fileRecord.name,
           fileRecord.key,
         );
       }
 
       dbLinks.push({
-        name: fileRecord.name || normalizedName,
+        name: fileRecord.name,
         url: signedUrl,
         thumbnailUrl,
       });
     }
 
-    if (dbLinks.length === attachmentNames.length) {
-      const linkMessage = buildLinkMessage({
-        text: message.text,
-        html: message.html,
-        links: dbLinks,
-      });
-      message.text = linkMessage.text;
-      message.html = linkMessage.html;
-      return transport.sendMail(message);
-    }
-
-    if (dbMatchFound || attachmentNames.length) {
-      const missingNames = attachmentNames.filter(
-        (name) => !foundFiles.has(String(name).trim().toLowerCase()),
-      );
-      throw new Error(
-        `Attachment not found in database: ${missingNames.join(", ") || attachmentNames.join(", ")}`,
-      );
-    }
+    const linkMessage = buildLinkMessage({
+      text: message.text,
+      html: message.html,
+      links: dbLinks,
+    });
+    message.text = linkMessage.text;
+    message.html = linkMessage.html;
   }
 
   return transport.sendMail(message);
