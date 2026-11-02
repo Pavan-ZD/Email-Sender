@@ -52,10 +52,37 @@ This project can be deployed as a Node web service on Render:
 - `SMTP_PASS`: your Outlook password or app password
 - `MAIL_FROM`: your sender email address
 
-5. Deploy and open the generated URL. Test the health endpoint at `/`, then send mail with `POST /api/send-email`.
+5. Deploy and open the generated URL. Test the health endpoint at `/`, then send mail with `POST /api/send-email`. Both need the `Authorization: Basic <AUTH_BASIC_TOKEN>` header (see Authentication below).
 
 The hosted endpoint will look like:
 `https://your-service-name.onrender.com/api/send-email`
+
+## Authentication
+
+Every endpoint, including the health check at `/`, requires this header:
+
+```
+Authorization: Basic <AUTH_BASIC_TOKEN>
+```
+
+Set `AUTH_BASIC_TOKEN` in `.env` (see `.env.example`); the server refuses to
+start without it. A missing or wrong header returns `401`.
+
+```js
+const authHeader = `Basic ${basicToken}`;
+
+const response = await fetch("http://localhost:3000/api/files/exists", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: authHeader,
+  },
+  body: JSON.stringify({ hash }),
+});
+```
+
+In Postman, open the **Headers** tab and add `Authorization` with the value
+`Basic <AUTH_BASIC_TOKEN>`.
 
 ## Upload files from the frontend
 
@@ -73,6 +100,7 @@ formData.append("file", selectedFile);
 
 const response = await fetch("http://localhost:3000/api/files", {
   method: "POST",
+  headers: { Authorization: authHeader },
   body: formData,
 });
 
@@ -203,6 +231,7 @@ Each `attachmentHash` must match a `file_hash` stored in the `files` database ta
 ```bash
 curl -X POST http://localhost:3000/api/send-email \
   -H "Content-Type: application/json" \
+  -H "Authorization: Basic <token>" \
   -d '{
     "to": "someone@example.com",
     "subject": "Test Email",
