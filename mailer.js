@@ -2,8 +2,7 @@ const nodemailer = require("nodemailer");
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
-const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { S3Client, PutObjectAclCommand } = require("@aws-sdk/client-s3");
 const mysql = require("mysql2/promise");
 
 const databaseSsl =
@@ -217,7 +216,7 @@ const buildLinkMessage = ({ text, html, links }) => {
         </td>
       </tr>
       <tr>
-        <td style="padding: 4px 22px 24px 22px; font-family: Arial, sans-serif; font-size: 11px; line-height: 17px; color: #94a3b8;">Links may expire for security. Please contact the sender if a link is no longer available.</td>
+        <td style="padding: 4px 22px 24px 22px; font-family: Arial, sans-serif; font-size: 11px; line-height: 17px; color: #94a3b8;">Please contact the sender if a link is no longer available.</td>
       </tr>
     </table>
   `;
@@ -228,19 +227,36 @@ const buildLinkMessage = ({ text, html, links }) => {
   };
 };
 
-const getPresignedUrl = (key) => {
-  if (!key || !process.env.DO_SPACES_BUCKET) {
+// Files are uploaded private and made public only when they are emailed
+const makeObjectPublic = (key) =>
+  s3.send(
+    new PutObjectAclCommand({
+      Bucket: process.env.DO_SPACES_BUCKET,
+      Key: key,
+      ACL: "public-read",
+    }),
+  );
+
+const isAbsoluteUrl = (value) => /^https?:\/\//i.test(String(value || ""));
+
+// Permanent URL for a public object; never expires.
+// DO_SPACES_PUBLIC_URL can point at a CDN; otherwise the bucket's own host is used.
+const getPublicUrl = (key) => {
+  if (
+    !key ||
+    !process.env.DO_SPACES_BUCKET ||
+    !process.env.DO_SPACES_ENDPOINT
+  ) {
     return null;
   }
 
-  return getSignedUrl(
-    s3,
-    new GetObjectCommand({
-      Bucket: process.env.DO_SPACES_BUCKET,
-      Key: key,
-    }),
-    { expiresIn: Number(process.env.DO_SPACES_URL_EXPIRES || 3600) },
-  );
+  const baseUrl = (
+    process.env.DO_SPACES_PUBLIC_URL ||
+    `https://${process.env.DO_SPACES_BUCKET}.${new URL(process.env.DO_SPACES_ENDPOINT).host}`
+  ).replace(/\/+$/, "");
+  const encodedKey = String(key).split("/").map(encodeURIComponent).join("/");
+
+  return `${baseUrl}/${encodedKey}`;
 };
 
 const db = mysql.createPool({
@@ -255,7 +271,10 @@ const db = mysql.createPool({
   queueLimit: 0,
 });
 
-const normalizeHash = (value) => String(value || "").trim().toLowerCase();
+const normalizeHash = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase();
 
 const findFilesByHashes = async (hashes) => {
   const fileLookup = new Map();
@@ -336,16 +355,35 @@ const sendEmail = async ({
     for (const hash of attachmentHashes) {
       const fileRecord = foundFiles.get(normalizeHash(hash));
 
-      const signedUrl = await getPresignedUrl(fileRecord.key);
-      if (!signedUrl) {
+      const fileUrl = getPublicUrl(fileRecord.key);
+      if (!fileUrl) {
         throw new Error(
-          `DigitalOcean Spaces is not configured for attachment "${fileRecord.name}". Add DO_SPACES_BUCKET, DO_SPACES_KEY, DO_SPACES_SECRET, DO_SPACES_ENDPOINT, and DO_SPACES_REGION.`,
+          `DigitalOcean Spaces is not configured for attachment "${fileRecord.name}". Add DO_SPACES_BUCKET and DO_SPACES_ENDPOINT.`,
         );
       }
 
-      let thumbnailUrl = fileRecord.thumbnailUrl || null;
-      if (thumbnailUrl) {
-        thumbnailUrl = (await getPresignedUrl(thumbnailUrl)) || thumbnailUrl;
+      try {
+        await makeObjectPublic(fileRecord.key);
+      } catch (error) {
+        throw new Error(
+          `Could not make attachment "${fileRecord.name}" public: ${error.message}`,
+        );
+      }
+
+      // thumbnail_url normally holds a Spaces key; a full URL is used as-is
+      let thumbnailUrl = null;
+      if (isAbsoluteUrl(fileRecord.thumbnailUrl)) {
+        thumbnailUrl = fileRecord.thumbnailUrl;
+      } else if (fileRecord.thumbnailUrl) {
+        try {
+          await makeObjectPublic(fileRecord.thumbnailUrl);
+          thumbnailUrl = getPublicUrl(fileRecord.thumbnailUrl);
+        } catch (error) {
+          // Fall back to a generated thumbnail rather than failing the email
+          console.warn(
+            `Could not make thumbnail public for "${fileRecord.name}": ${error.message}`,
+          );
+        }
       }
       if (!thumbnailUrl) {
         thumbnailUrl = await generateThumbnailForName(
@@ -356,7 +394,7 @@ const sendEmail = async ({
 
       dbLinks.push({
         name: fileRecord.name,
-        url: signedUrl,
+        url: fileUrl,
         thumbnailUrl,
       });
     }

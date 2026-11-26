@@ -110,8 +110,10 @@ console.log(result.file.hash);
 
 The upload response contains the file name, its SHA-256 hash, and the stored
 object keys. Send `result.file.hash` as `attachmentHash` to `/api/send-email`.
-The email API then generates signed URLs and does not attach the remote file to
-the email.
+The email API then links to the file's public URL and does not attach the remote
+file to the email. Files are uploaded private; when a file is emailed, it and its
+thumbnail are made `public-read`, so the links never expire and anyone with a link
+can open the file. Files that are never emailed stay private.
 
 The `files` table must contain these columns:
 
